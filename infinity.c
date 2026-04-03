@@ -196,6 +196,20 @@ static void append_jsonrpc_stub(StrBuf *sb, const Config *cfg, const char *paylo
     sb_appendf(sb, "}");
 }
 
+typedef struct ProxyConfig {
+    char listen_host[256];
+    char listen_port[32];
+    char upstream_host[256];
+    char upstream_port[32];
+    int max_connections;
+    int idle_timeout_sec;
+    int backlog;
+    bool verbose;
+
+    char spool_dir[PATH_MAX];
+    bool delta_link_on_close;
+} ProxyConfig;
+
 typedef struct Buffer {
     uint8_t data[INF_BUFFER_CAP];
     size_t start;
