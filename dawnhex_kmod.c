@@ -21,6 +21,76 @@
 #define DAWNHEX_EVENT_LEN 160
 #define DAWNHEX_DEFAULT_TICK_MS 500
 
+#define DH_PPM 1000000U
+#define DH_Q16 65536U
+
+/* Simplex constants */
+#define DH_SIMPLEX_MIN_RETAINED_PPM   10200U
+#define DH_SIMPLEX_MAX_RETAINED_PPM  120000U
+
+#define DH_SIMPLEX_LEVEL_GAIN_PPM    144000U
+#define DH_SIMPLEX_NODE_GAIN_PPM      21000U
+#define DH_SIMPLEX_PHASE_GAIN_PPM     10200U
+
+#define DH_SIMPLEX_ARM_Q16            77857U   /* 1.188 */
+#define DH_SIMPLEX_ADDER_Q16          27525U   /* 0.42  */
+#define DH_SIMPLEX_MODIFIER_Q16       67830U   /* 1.035 */
+#define DH_SIMPLEX_U_SCALAR_Q16      114688U   /* 1.75  */
+#define DH_SIMPLEX_KNOT_Q16           32086U   /* ~0.4896 */
+
+#define DH_SIMPLEX_FLAG_SUPERCOMPUTE  0x1
+#define DH_SIMPLEX_FLAG_CHIP_RELAY    0x2
+
+static inline u32 dh_mul_ppm(u32 a, u32 b)
+{
+	u64 v = (u64)a * (u64)b;
+	v += DH_PPM / 2;
+	v /= DH_PPM;
+	return (u32)v;
+}
+
+static inline u32 dh_mul_q16(u32 a, u32 q16)
+{
+	u64 v = (u64)a * (u64)q16;
+	v += DH_Q16 / 2;
+	v >>= 16;
+	return (u32)v;
+}
+
+static inline void dh_build_9_mips(u32 base_retained_ppm, u32 out[DAWNHEX_SIMPLEX_MIPS])
+{
+	static const u32 weights_ppm[DAWNHEX_SIMPLEX_MIPS] = {
+		2400000U, 1850000U, 1400000U, 1050000U,
+		 800000U,  600000U,  450000U,  300000U, 200000U
+	};
+	u32 i;
+
+	for (i = 0; i < DAWNHEX_SIMPLEX_MIPS; ++i) {
+		u64 v = (u64)base_retained_ppm * (u64)weights_ppm[i];
+		v += DH_PPM / 2;
+		v /= DH_PPM;
+		out[i] = dh_clamp_u32((u32)v, 1000U, DH_PPM);
+	}
+}
+
+static void dh_fill_fib22(u32 out[DAWNHEX_SIMPLEX_LEVELS], u64 *total)
+{
+	u32 i;
+
+	memset(out, 0, sizeof(u32) * DAWNHEX_SIMPLEX_LEVELS);
+	*total = 0;
+
+	out[0] = 1;
+	out[1] = 1;
+	*total = 2;
+
+	for (i = 2; i < DAWNHEX_SIMPLEX_LEVELS; ++i) {
+		out[i] = out[i - 1] + out[i - 2];
+		*total += out[i];
+	}
+}
+
+
 int dawnhex_duo_hook_register(struct dawnhex_duo_hook *hook)
 {
 	if (!hook || !hook->fn || !hook->name)
