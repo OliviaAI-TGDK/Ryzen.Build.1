@@ -128,6 +128,74 @@ int dawnhex_duo_pulse_kernel(u32 pair_id, u32 value_ppm)
 }
 EXPORT_SYMBOL_GPL(dawnhex_duo_pulse_kernel);
 
+
+struct dawnhex_duo_simplex_level {
+	u32 level_index;
+	u32 fib_value;
+	u32 fib_weight_ppm;
+
+	u32 node_count;
+
+	u32 retained_ppm;
+	u32 reduction_ppm;
+	u32 crosshatch_ppm;
+	u32 coldness_ppm;
+	u32 energy_ppm;
+	u32 pressure_ppm;
+
+	u32 mip_retained_ppm[DAWNHEX_SIMPLEX_MIPS];
+};
+
+struct dawnhex_duo_simplex_state {
+	u32 level_count;
+	u32 node_count;
+
+	u32 base_retained_ppm;
+	u32 recursive_retained_ppm;
+	u32 recursive_reduction_ppm;
+	u32 recursive_crosshatch_ppm;
+	u32 recursive_coldness_ppm;
+	u32 recursive_energy_ppm;
+
+	u32 flags;
+	struct dawnhex_duo_simplex_level levels[DAWNHEX_SIMPLEX_LEVELS];
+};
+
+struct dawnhex_duo_pair {
+	u32 pair_id;
+	u32 a;
+	u32 b;
+	u32 mode;
+	bool active;
+
+	u32 quotient_ppm;
+	u32 refraction_ppm;
+	u32 energy_ppm;
+	u32 pressure_ppm;
+
+	u32 pulses;
+	u32 last_value_ppm;
+
+	struct dawnhex_duo_simplex_state simplex;
+};
+
+struct dawnhex_duo_hook_ctx {
+	u32 pair_id;
+	u32 a;
+	u32 b;
+	u32 mode;
+	u32 value_ppm;
+	u32 quotient_ppm;
+	u32 refraction_ppm;
+	u32 energy_ppm;
+	u32 pressure_ppm;
+
+	/* new Simplex/Fibonacci summary */
+	u32 simplex_base_retained_ppm;
+	u32 simplex_recursive_retained_ppm;
+	u32 simplex_recursive_reduction_ppm;
+	u32 simplex_recursive_energy_ppm;
+};
 struct dawnhex_duo_pair {
 	u32 pair_id;
 	u32 a;
