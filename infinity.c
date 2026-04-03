@@ -50,6 +50,152 @@
 #define INF_DEFAULT_BACKLOG  512
 #define INF_FD_MAP_CAP       65536
 
+
+typedef struct {
+    char card[32];
+    char path[PATH_MAX];
+    char campaign_id[128];
+    char advertiser_id[128];
+    int interval_sec;
+    bool once;
+    bool include_xattrs;
+    bool include_stat;
+    bool include_gpu;
+
+    /* blockchain / geth compatibility */
+    bool blockchain_mode;
+    bool emit_jsonrpc_stub;
+    char chain_namespace[64];     /* default ".MNTN" */
+    char chain_id[64];            /* placeholder string */
+    char geth_rpc_url[512];       /* optional */
+    char contract_address[128];   /* optional */
+} Config;
+
+static void config_default(Config *cfg) {
+    memset(cfg, 0, sizeof(*cfg));
+    snprintf(cfg->card, sizeof(cfg->card), "card0");
+    snprintf(cfg->path, sizeof(cfg->path), ".");
+    cfg->interval_sec = 30;
+    cfg->once = false;
+    cfg->include_xattrs = true;
+    cfg->include_stat = true;
+    cfg->include_gpu = true;
+
+    cfg->blockchain_mode = false;
+    cfg->emit_jsonrpc_stub = false;
+    snprintf(cfg->chain_namespace, sizeof(cfg->chain_namespace), ".MNTN");
+    snprintf(cfg->chain_id, sizeof(cfg->chain_id), "mntn-placeholder-1");
+    cfg->geth_rpc_url[0] = '\0';
+    cfg->contract_address[0] = '\0';
+}
+
+static void parse_args(Config *cfg, int argc, char **argv) {
+    for (int i = 1; i < argc; ++i) {
+        if (!strcmp(argv[i], "--card")) {
+            if (++i >= argc) die("missing value for --card");
+            snprintf(cfg->card, sizeof(cfg->card), "%s", argv[i]);
+        } else if (!strcmp(argv[i], "--path")) {
+            if (++i >= argc) die("missing value for --path");
+            snprintf(cfg->path, sizeof(cfg->path), "%s", argv[i]);
+        } else if (!strcmp(argv[i], "--campaign")) {
+            if (++i >= argc) die("missing value for --campaign");
+            snprintf(cfg->campaign_id, sizeof(cfg->campaign_id), "%s", argv[i]);
+        } else if (!strcmp(argv[i], "--advertiser")) {
+            if (++i >= argc) die("missing value for --advertiser");
+            snprintf(cfg->advertiser_id, sizeof(cfg->advertiser_id), "%s", argv[i]);
+        } else if (!strcmp(argv[i], "--interval")) {
+            if (++i >= argc) die("missing value for --interval");
+            cfg->interval_sec = atoi(argv[i]);
+            if (cfg->interval_sec < 1) cfg->interval_sec = 1;
+        } else if (!strcmp(argv[i], "--once")) {
+            cfg->once = true;
+        } else if (!strcmp(argv[i], "--no-xattrs")) {
+            cfg->include_xattrs = false;
+        } else if (!strcmp(argv[i], "--no-stat")) {
+            cfg->include_stat = false;
+        } else if (!strcmp(argv[i], "--no-gpu")) {
+            cfg->include_gpu = false;
+        } else if (!strcmp(argv[i], "--blockchain")) {
+            cfg->blockchain_mode = true;
+        } else if (!strcmp(argv[i], "--emit-jsonrpc-stub")) {
+            cfg->emit_jsonrpc_stub = true;
+        } else if (!strcmp(argv[i], "--chain-namespace")) {
+            if (++i >= argc) die("missing value for --chain-namespace");
+            snprintf(cfg->chain_namespace, sizeof(cfg->chain_namespace), "%s", argv[i]);
+        } else if (!strcmp(argv[i], "--chain-id")) {
+            if (++i >= argc) die("missing value for --chain-id");
+            snprintf(cfg->chain_id, sizeof(cfg->chain_id), "%s", argv[i]);
+        } else if (!strcmp(argv[i], "--geth-rpc-url")) {
+            if (++i >= argc) die("missing value for --geth-rpc-url");
+            snprintf(cfg->geth_rpc_url, sizeof(cfg->geth_rpc_url), "%s", argv[i]);
+        } else if (!strcmp(argv[i], "--contract-address")) {
+            if (++i >= argc) die("missing value for --contract-address");
+            snprintf(cfg->contract_address, sizeof(cfg->contract_address), "%s", argv[i]);
+        } else {
+            usage(argv[0]);
+            exit(1);
+        }
+    }
+
+    if (!cfg->campaign_id[0]) die("missing --campaign");
+    if (!cfg->advertiser_id[0]) die("missing --advertiser");
+}
+
+static uint64_t fnv1a64(const unsigned char *data, size_t len) {
+    uint64_t h = 1469598103934665603ULL;
+    for (size_t i = 0; i < len; ++i) {
+        h ^= (uint64_t)data[i];
+        h *= 1099511628211ULL;
+    }
+    return h;
+}
+
+static void append_blockchain_envelope(StrBuf *sb, const Config *cfg, const char *payload_json) {
+    uint64_t anchor_hash = fnv1a64((const unsigned char *)payload_json, strlen(payload_json));
+
+    sb_appendf(sb, "\"blockchain\":{");
+    sb_appendf(sb, "\"enabled\":%s,", cfg->blockchain_mode ? "true" : "false");
+    sb_appendf(sb, "\"namespace\":");
+    json_escape_append(sb, cfg->chain_namespace);
+    sb_appendf(sb, ",");
+    sb_appendf(sb, "\"chain_id\":");
+    json_escape_append(sb, cfg->chain_id);
+    sb_appendf(sb, ",");
+    sb_appendf(sb, "\"anchor_mode\":\"geth-compatible\",");
+    sb_appendf(sb, "\"anchor_hash_fnv64\":\"0x%016llx\",", (unsigned long long)anchor_hash);
+    sb_appendf(sb, "\"signing_mode\":\"ethereum_personal_sign_compatible\",");
+    sb_appendf(sb, "\"rpc_url\":");
+    json_escape_append(sb, cfg->geth_rpc_url);
+    sb_appendf(sb, ",");
+    sb_appendf(sb, "\"contract_address\":");
+    json_escape_append(sb, cfg->contract_address);
+    sb_appendf(sb, "}");
+}
+
+static void append_jsonrpc_stub(StrBuf *sb, const Config *cfg, const char *payload_json) {
+    uint64_t anchor_hash = fnv1a64((const unsigned char *)payload_json, strlen(payload_json));
+
+    sb_appendf(sb, "\"jsonrpc_stub\":{");
+    sb_appendf(sb, "\"jsonrpc\":\"2.0\",");
+    sb_appendf(sb, "\"id\":1,");
+    sb_appendf(sb, "\"method\":\"eth_call\",");
+    sb_appendf(sb, "\"params\":[{");
+    sb_appendf(sb, "\"to\":");
+    json_escape_append(sb, cfg->contract_address[0] ? cfg->contract_address : "0x0000000000000000000000000000000000000000");
+    sb_appendf(sb, ",");
+    sb_appendf(sb, "\"data\":");
+    json_escape_append(sb, "0x.MNTN_PLACEHOLDER_CALLDATA");
+    sb_appendf(sb, "},\"latest\"],");
+    sb_appendf(sb, "\"note\":");
+    json_escape_append(
+        sb,
+        "Replace data with ABI-encoded calldata or use personal_sign/account_signData on the anchor payload."
+    );
+    sb_appendf(sb, ",");
+    sb_appendf(sb, "\"anchor_hash_fnv64\":\"0x%016llx\"", (unsigned long long)anchor_hash);
+    sb_appendf(sb, "}");
+}
+
 typedef struct Buffer {
     uint8_t data[INF_BUFFER_CAP];
     size_t start;
@@ -682,6 +828,16 @@ static void enforce_idle_timeouts(const Config *cfg, int epfd) {
         }
         s = next;
     }
+}
+
+static void usage(const char *argv0) {
+    fprintf(stderr,
+        "usage: %s --path PATH --campaign ID --advertiser ID "
+        "[--card card0] [--interval SEC] [--once] [--no-xattrs] [--no-stat] [--no-gpu] "
+        "[--blockchain] [--emit-jsonrpc-stub] [--chain-namespace .MNTN] "
+        "[--chain-id mntn-placeholder-1] [--geth-rpc-url URL] [--contract-address 0x...]\n",
+        argv0
+    );
 }
 
 int main(int argc, char **argv) {
