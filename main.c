@@ -1,3 +1,9 @@
+const std::string zcoldPolicy = read_text_file("zcold_policy.json");
+if (!zcoldPolicy.empty()) {
+    std::cout << "=== XEM ZRAM COLDMET POLICY ===\n";
+    std::cout << zcoldPolicy << "\n";
+}
+
 DuoQuadratalizerConfig dqCfg;
 dqCfg.levelCount = 22;
 dqCfg.baseRefraction = 0.0102;
