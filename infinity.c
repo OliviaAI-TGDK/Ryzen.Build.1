@@ -71,6 +71,59 @@ typedef struct {
     char contract_address[128];   /* optional */
 } Config;
 
+static int ensure_dir(const char *path) {
+    struct stat st;
+    if (stat(path, &st) == 0) {
+        if (S_ISDIR(st.st_mode)) return 0;
+        errno = ENOTDIR;
+        return -1;
+    }
+    if (mkdir(path, 0700) == 0) return 0;
+    return -1;
+}
+
+static int write_artifact_file(const char *path, const uint8_t *data, size_t len) {
+    FILE *f = fopen(path, "wb");
+    if (!f) return -1;
+    if (len && fwrite(data, 1, len, f) != len) {
+        fclose(f);
+        return -1;
+    }
+    fclose(f);
+    return 0;
+}
+
+static int session_emit_artifact(const ProxyConfig *cfg, const Session *s, char *out_path, size_t out_path_sz) {
+    if (ensure_dir(cfg->spool_dir) != 0) return -1;
+
+    snprintf(out_path, out_path_sz, "%s/session-%llu.bin",
+             cfg->spool_dir, (unsigned long long)s->id);
+
+    /*
+     * Emit what remains in the relay buffers as a compact artifact.
+     * You can change this to emit a full transcript later.
+     */
+    Buffer merged = {0};
+
+    size_t a = buffer_size(&s->to_upstream);
+    size_t b = buffer_size(&s->to_client);
+    if ((a + b) > INF_BUFFER_CAP) {
+        a = (a > INF_BUFFER_CAP / 2) ? INF_BUFFER_CAP / 2 : a;
+        b = (b > (INF_BUFFER_CAP - a)) ? (INF_BUFFER_CAP - a) : b;
+    }
+
+    if (a) {
+        memcpy(merged.data + merged.end, s->to_upstream.data + s->to_upstream.start, a);
+        merged.end += a;
+    }
+    if (b) {
+        memcpy(merged.data + merged.end, s->to_client.data + s->to_client.start, b);
+        merged.end += b;
+    }
+
+    return write_artifact_file(out_path, merged.data, merged.end);
+}
+
 static void config_default(Config *cfg) {
     memset(cfg, 0, sizeof(*cfg));
     snprintf(cfg->card, sizeof(cfg->card), "card0");
