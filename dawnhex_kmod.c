@@ -65,6 +65,162 @@ struct dawnhex_duo_state {
 	struct list_head hooks;
 };
 
+static struct dawnhex_duo_pair *dh_duo_lookup_pair_locked(u32 pair_id)
+{
+	u32 i;
+
+	for (i = 0; i < g_dawnhex.duo.pair_count; ++i) {
+		if (g_dawnhex.duo.pairs[i].pair_id == pair_id)
+			return &g_dawnhex.duo.pairs[i];
+	}
+	return NULL;
+}
+
+static u32 dh_duo_default_quotient_ppm(u32 mode)
+{
+	switch (mode) {
+	case DAWNHEX_DUO_INOUT_INOUT_OUT:
+		return 1000000;
+	case DAWNHEX_DUO_INOUT_INOUT_IN:
+		return 1000000;
+	case DAWNHEX_DUO_CROSSED:
+		return 1250000;
+	default:
+		return 0;
+	}
+}
+
+static u32 dh_duo_default_refraction_ppm(u32 mode)
+{
+	switch (mode) {
+	case DAWNHEX_DUO_INOUT_INOUT_OUT:
+		return 1010200; /* 1.0102 */
+	case DAWNHEX_DUO_INOUT_INOUT_IN:
+		return 1020300; /* 1.0203 */
+	case DAWNHEX_DUO_CROSSED:
+		return 1044400; /* 1.0444 */
+	default:
+		return 1000000;
+	}
+}
+
+static void dh_duo_emit_hooks_locked(const struct dawnhex_duo_hook_ctx *ctx)
+{
+	struct dawnhex_duo_hook *hook;
+
+	list_for_each_entry(hook, &g_dawnhex.duo.hooks, node) {
+		if (hook->fn)
+			hook->fn(ctx, hook->priv);
+	}
+}
+
+static int dh_duo_add_pair_locked(u32 a, u32 b, u32 mode, u32 *out_pair_id)
+{
+	struct dawnhex_duo_pair *p;
+	struct dawnhex_node *na, *nb;
+
+	if (g_dawnhex.duo.pair_count >= DAWNHEX_DUO_MAX_PAIRS)
+		return -ENOSPC;
+
+	if (a == b)
+		return -EINVAL;
+
+	na = dh_lookup_node_locked(a);
+	nb = dh_lookup_node_locked(b);
+	if (!na || !nb)
+		return -ENOENT;
+
+	p = &g_dawnhex.duo.pairs[g_dawnhex.duo.pair_count++];
+	memset(p, 0, sizeof(*p));
+
+	p->pair_id = ++g_dawnhex.duo.next_pair_id;
+	p->a = a;
+	p->b = b;
+	p->mode = mode;
+	p->active = true;
+	p->quotient_ppm = dh_duo_default_quotient_ppm(mode);
+	p->refraction_ppm = dh_duo_default_refraction_ppm(mode);
+	p->energy_ppm = 500000;
+	p->pressure_ppm = 500000;
+
+	if (out_pair_id)
+		*out_pair_id = p->pair_id;
+
+	dh_emit_event_locked("duo_add pair=%u a=%u b=%u mode=%u",
+			     p->pair_id, a, b, mode);
+	return 0;
+}
+
+static int dh_duo_del_pair_locked(u32 pair_id)
+{
+	u32 i;
+
+	for (i = 0; i < g_dawnhex.duo.pair_count; ++i) {
+		if (g_dawnhex.duo.pairs[i].pair_id == pair_id) {
+			memmove(&g_dawnhex.duo.pairs[i],
+				&g_dawnhex.duo.pairs[i + 1],
+				(g_dawnhex.duo.pair_count - i - 1) *
+				sizeof(struct dawnhex_duo_pair));
+			g_dawnhex.duo.pair_count--;
+			dh_emit_event_locked("duo_del pair=%u", pair_id);
+			return 0;
+		}
+	}
+	return -ENOENT;
+}
+
+static int dh_duo_pulse_locked(u32 pair_id, u32 value_ppm)
+{
+	struct dawnhex_duo_pair *p;
+	struct dawnhex_node *na, *nb;
+	struct dawnhex_duo_hook_ctx ctx;
+	u32 base_energy;
+	u32 base_pressure;
+
+	p = dh_duo_lookup_pair_locked(pair_id);
+	if (!p || !p->active)
+		return -ENOENT;
+
+	na = dh_lookup_node_locked(p->a);
+	nb = dh_lookup_node_locked(p->b);
+	if (!na || !nb)
+		return -ENOENT;
+
+	value_ppm = dh_clamp_u32(value_ppm, 0, 1000000);
+
+	base_energy = (na->energy_ppm + nb->energy_ppm) / 2;
+	base_pressure = (na->health_ppm + nb->health_ppm) / 2;
+
+	p->last_value_ppm = value_ppm;
+	p->pulses++;
+
+	/* duo crossed transform */
+	p->energy_ppm = dh_clamp_u32((base_energy + value_ppm) / 2, 0, 1000000);
+	p->pressure_ppm = dh_clamp_u32((base_pressure + (1000000 - value_ppm)) / 2, 0, 1000000);
+
+	/* feed back into nodes */
+	na->energy_ppm = dh_clamp_u32((na->energy_ppm + p->energy_ppm) / 2, 0, 1000000);
+	nb->energy_ppm = dh_clamp_u32((nb->energy_ppm + p->energy_ppm) / 2, 0, 1000000);
+
+	memset(&ctx, 0, sizeof(ctx));
+	ctx.pair_id = p->pair_id;
+	ctx.a = p->a;
+	ctx.b = p->b;
+	ctx.mode = p->mode;
+	ctx.value_ppm = p->last_value_ppm;
+	ctx.quotient_ppm = p->quotient_ppm;
+	ctx.refraction_ppm = p->refraction_ppm;
+	ctx.energy_ppm = p->energy_ppm;
+	ctx.pressure_ppm = p->pressure_ppm;
+
+	dh_duo_emit_hooks_locked(&ctx);
+
+	dh_emit_event_locked("duo_pulse pair=%u value=%u energy=%u pressure=%u",
+			     p->pair_id, p->last_value_ppm,
+			     p->energy_ppm, p->pressure_ppm);
+	return 0;
+}
+
 struct dawnhex_node {
 	u32 id;
 	char name[DAWNHEX_NAME_LEN];
