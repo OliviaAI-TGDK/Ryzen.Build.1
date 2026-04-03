@@ -21,6 +21,43 @@
 #define DAWNHEX_EVENT_LEN 160
 #define DAWNHEX_DEFAULT_TICK_MS 500
 
+int dawnhex_duo_hook_register(struct dawnhex_duo_hook *hook)
+{
+	if (!hook || !hook->fn || !hook->name)
+		return -EINVAL;
+
+	mutex_lock(&g_dawnhex.lock);
+	list_add_tail(&hook->node, &g_dawnhex.duo.hooks);
+	dh_emit_event_locked("duo_hook_register name=%s", hook->name);
+	mutex_unlock(&g_dawnhex.lock);
+	return 0;
+}
+EXPORT_SYMBOL_GPL(dawnhex_duo_hook_register);
+
+void dawnhex_duo_hook_unregister(struct dawnhex_duo_hook *hook)
+{
+	if (!hook)
+		return;
+
+	mutex_lock(&g_dawnhex.lock);
+	list_del_init(&hook->node);
+	dh_emit_event_locked("duo_hook_unregister name=%s", hook->name ? hook->name : "unknown");
+	mutex_unlock(&g_dawnhex.lock);
+}
+EXPORT_SYMBOL_GPL(dawnhex_duo_hook_unregister);
+
+int dawnhex_duo_pulse_kernel(u32 pair_id, u32 value_ppm)
+{
+	int ret;
+
+	mutex_lock(&g_dawnhex.lock);
+	ret = dh_duo_pulse_locked(pair_id, value_ppm);
+	mutex_unlock(&g_dawnhex.lock);
+
+	return ret;
+}
+EXPORT_SYMBOL_GPL(dawnhex_duo_pulse_kernel);
+
 struct dawnhex_duo_pair {
 	u32 pair_id;
 	u32 a;
@@ -470,7 +507,109 @@ static int dh_handle_command_locked(char *cmd)
 {
 	u32 a, b, v;
 	char name[DAWNHEX_NAME_LEN];
+    case DAWNHEX_DUO_IOC_ADD_PAIR: {
+		struct dawnhex_duo_add_uapi add;
+		u32 pair_id = 0;
 
+		if (copy_from_user(&add, (void __user *)arg, sizeof(add)))
+			return -EFAULT;
+
+		mutex_lock(&g_dawnhex.lock);
+		ret = dh_duo_add_pair_locked(add.a, add.b, add.mode, &pair_id);
+		mutex_unlock(&g_dawnhex.lock);
+		if (ret)
+			return ret;
+
+		add.out_pair_id = pair_id;
+		if (copy_to_user((void __user *)arg, &add, sizeof(add)))
+			return -EFAULT;
+		return 0;
+	}
+
+	case DAWNHEX_DUO_IOC_DEL_PAIR: {
+		struct dawnhex_duo_del_uapi del;
+
+		if (copy_from_user(&del, (void __user *)arg, sizeof(del)))
+			return -EFAULT;
+
+		mutex_lock(&g_dawnhex.lock);
+		ret = dh_duo_del_pair_locked(del.pair_id);
+		mutex_unlock(&g_dawnhex.lock);
+		return ret;
+	}
+
+	case DAWNHEX_DUO_IOC_PULSE: {
+		struct dawnhex_duo_pulse_uapi pulse;
+
+		if (copy_from_user(&pulse, (void __user *)arg, sizeof(pulse)))
+			return -EFAULT;
+
+		mutex_lock(&g_dawnhex.lock);
+		ret = dh_duo_pulse_locked(pulse.pair_id, pulse.value_ppm);
+		mutex_unlock(&g_dawnhex.lock);
+		return ret;
+	}
+
+	case DAWNHEX_DUO_IOC_GET_PAIR: {
+		struct dawnhex_duo_get_uapi get;
+		struct dawnhex_duo_pair *p;
+
+		if (copy_from_user(&get, (void __user *)arg, sizeof(get)))
+			return -EFAULT;
+
+		mutex_lock(&g_dawnhex.lock);
+		p = dh_duo_lookup_pair_locked(get.pair_id);
+		if (!p) {
+			mutex_unlock(&g_dawnhex.lock);
+			return -ENOENT;
+		}
+
+		get.pair.pair_id = p->pair_id;
+		get.pair.a = p->a;
+		get.pair.b = p->b;
+		get.pair.mode = p->mode;
+		get.pair.active = p->active;
+		get.pair.quotient_ppm = p->quotient_ppm;
+		get.pair.refraction_ppm = p->refraction_ppm;
+		get.pair.energy_ppm = p->energy_ppm;
+		get.pair.pressure_ppm = p->pressure_ppm;
+		get.pair.pulses = p->pulses;
+		get.pair.last_value_ppm = p->last_value_ppm;
+		mutex_unlock(&g_dawnhex.lock);
+
+		if (copy_to_user((void __user *)arg, &get, sizeof(get)))
+			return -EFAULT;
+		return 0;
+	}
+
+	case DAWNHEX_DUO_IOC_DUMP: {
+		struct dawnhex_duo_dump_uapi dump;
+		u32 i;
+
+		memset(&dump, 0, sizeof(dump));
+
+		mutex_lock(&g_dawnhex.lock);
+		dump.pair_count = g_dawnhex.duo.pair_count;
+		for (i = 0; i < g_dawnhex.duo.pair_count; ++i) {
+			struct dawnhex_duo_pair *p = &g_dawnhex.duo.pairs[i];
+			dump.pairs[i].pair_id = p->pair_id;
+			dump.pairs[i].a = p->a;
+			dump.pairs[i].b = p->b;
+			dump.pairs[i].mode = p->mode;
+			dump.pairs[i].active = p->active;
+			dump.pairs[i].quotient_ppm = p->quotient_ppm;
+			dump.pairs[i].refraction_ppm = p->refraction_ppm;
+			dump.pairs[i].energy_ppm = p->energy_ppm;
+			dump.pairs[i].pressure_ppm = p->pressure_ppm;
+			dump.pairs[i].pulses = p->pulses;
+			dump.pairs[i].last_value_ppm = p->last_value_ppm;
+		}
+		mutex_unlock(&g_dawnhex.lock);
+
+		if (copy_to_user((void __user *)arg, &dump, sizeof(dump)))
+			return -EFAULT;
+		return 0;
+	}
 	if (sscanf(cmd, "add %u %31s", &a, name) == 2)
 		return dh_add_node_locked(a, name);
 
@@ -492,7 +631,21 @@ static int dh_handle_command_locked(char *cmd)
 		dh_emit_event_locked("online id=%u value=%u", a, !!v);
 		return 0;
 	}
+    if (sscanf(cmd, "duo add %u %u %u", &a, &b, &v) == 3) {
+		u32 pair_id;
+		return dh_duo_add_pair_locked(a, b, v, &pair_id);
+	}
 
+	if (sscanf(cmd, "duo del %u", &a) == 1)
+		return dh_duo_del_pair_locked(a);
+
+	if (sscanf(cmd, "duo pulse %u %u", &a, &v) == 2)
+		return dh_duo_pulse_locked(a, v);
+
+	if (!strncmp(cmd, "duo snapshot", 12)) {
+		dh_emit_event_locked("duo_snapshot pairs=%u", g_dawnhex.duo.pair_count);
+		return 0;
+	}
 	if (sscanf(cmd, "energy %u %u", &a, &v) == 2) {
 		struct dawnhex_node *n = dh_lookup_node_locked(a);
 		if (!n)
@@ -754,6 +907,7 @@ static DEVICE_ATTR_RW(tick_ms);
 static DEVICE_ATTR_RW(interactive);
 
 static struct attribute *dawnhex_attrs[] = {
+    &dev_attr_duo.attr,
 	&dev_attr_summary.attr,
 	&dev_attr_topology.attr,
 	&dev_attr_tick_ms.attr,
@@ -781,7 +935,9 @@ static int __init dawnhex_init(void)
 	g_dawnhex.tick_ms = DAWNHEX_DEFAULT_TICK_MS;
 	g_dawnhex.interactive = true;
 	INIT_DELAYED_WORK(&g_dawnhex.tick_work, dh_tick_workfn);
-
+    INIT_LIST_HEAD(&g_dawnhex.duo.hooks);
+	g_dawnhex.duo.pair_count = 0;
+	g_dawnhex.duo.next_pair_id = 0;
 	g_dawnhex.misc.minor = MISC_DYNAMIC_MINOR;
 	g_dawnhex.misc.name = "dawnhex";
 	g_dawnhex.misc.fops = &dawnhex_fops;
@@ -812,6 +968,31 @@ static void __exit dawnhex_exit(void)
 	misc_deregister(&g_dawnhex.misc);
 	pr_info("dawnhex: unloaded\n");
 }
+
+static ssize_t duo_show(struct device *dev, struct device_attribute *attr, char *buf)
+{
+	ssize_t n = 0;
+	u32 i;
+
+	mutex_lock(&g_dawnhex.lock);
+	n += scnprintf(buf + n, PAGE_SIZE - n, "pair_count=%u\n", g_dawnhex.duo.pair_count);
+	for (i = 0; i < g_dawnhex.duo.pair_count; ++i) {
+		struct dawnhex_duo_pair *p = &g_dawnhex.duo.pairs[i];
+		n += scnprintf(buf + n, PAGE_SIZE - n,
+			       "pair=%u a=%u b=%u mode=%u active=%u quotient=%u refraction=%u energy=%u pressure=%u pulses=%u last=%u\n",
+			       p->pair_id, p->a, p->b, p->mode, p->active,
+			       p->quotient_ppm, p->refraction_ppm,
+			       p->energy_ppm, p->pressure_ppm,
+			       p->pulses, p->last_value_ppm);
+		if (n >= PAGE_SIZE)
+			break;
+	}
+	mutex_unlock(&g_dawnhex.lock);
+
+	return n;
+}
+
+static DEVICE_ATTR_RO(duo);
 
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("OpenAI");
