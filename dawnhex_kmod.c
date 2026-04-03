@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: GPL-2.0
 #include <linux/module.h>
 #include <linux/kernel.h>
+#include <linux/list.h>
+#include "dawnhex_duo_uapi.h"
 #include <linux/init.h>
 #include <linux/fs.h>
 #include <linux/miscdevice.h>
@@ -18,6 +20,50 @@
 #define DAWNHEX_EVENT_Q 128
 #define DAWNHEX_EVENT_LEN 160
 #define DAWNHEX_DEFAULT_TICK_MS 500
+
+struct dawnhex_duo_pair {
+	u32 pair_id;
+	u32 a;
+	u32 b;
+	u32 mode;
+	bool active;
+
+	u32 quotient_ppm;
+	u32 refraction_ppm;
+	u32 energy_ppm;
+	u32 pressure_ppm;
+
+	u32 pulses;
+	u32 last_value_ppm;
+};
+
+struct dawnhex_duo_hook_ctx {
+	u32 pair_id;
+	u32 a;
+	u32 b;
+	u32 mode;
+	u32 value_ppm;
+	u32 quotient_ppm;
+	u32 refraction_ppm;
+	u32 energy_ppm;
+	u32 pressure_ppm;
+};
+
+typedef int (*dawnhex_duo_hook_fn)(const struct dawnhex_duo_hook_ctx *ctx, void *priv);
+
+struct dawnhex_duo_hook {
+	struct list_head node;
+	const char *name;
+	dawnhex_duo_hook_fn fn;
+	void *priv;
+};
+
+struct dawnhex_duo_state {
+	struct dawnhex_duo_pair pairs[DAWNHEX_DUO_MAX_PAIRS];
+	u32 pair_count;
+	u32 next_pair_id;
+	struct list_head hooks;
+};
 
 struct dawnhex_node {
 	u32 id;
