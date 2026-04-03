@@ -952,7 +952,136 @@ static void usage(const char *argv0) {
     );
 }
 
+static void config_init(ProxyConfig *cfg) {
+    memset(cfg, 0, sizeof(*cfg));
+    snprintf(cfg->listen_host, sizeof(cfg->listen_host), "0.0.0.0");
+    snprintf(cfg->listen_port, sizeof(cfg->listen_port), "9000");
+    snprintf(cfg->upstream_host, sizeof(cfg->upstream_host), "127.0.0.1");
+    snprintf(cfg->upstream_port, sizeof(cfg->upstream_port), "8080");
+    snprintf(cfg->spool_dir, sizeof(cfg->spool_dir), "./spool");
+    cfg->max_connections = INF_DEFAULT_MAX_CONN;
+    cfg->idle_timeout_sec = INF_DEFAULT_IDLE_SEC;
+    cfg->backlog = INF_DEFAULT_BACKLOG;
+    cfg->verbose = false;
+    cfg->delta_link_on_close = true;
+}
+
+static void parse_args(ProxyConfig *cfg, int argc, char **argv) {
+    for (int i = 1; i < argc; ++i) {
+        if (!strcmp(argv[i], "--listen")) {
+            if (++i >= argc) die("missing value for --listen");
+            if (parse_host_port(argv[i], cfg->listen_host, sizeof(cfg->listen_host),
+                                cfg->listen_port, sizeof(cfg->listen_port)) != 0) {
+                die("invalid --listen, expected host:port");
+            }
+        } else if (!strcmp(argv[i], "--upstream")) {
+            if (++i >= argc) die("missing value for --upstream");
+            if (parse_host_port(argv[i], cfg->upstream_host, sizeof(cfg->upstream_host),
+                                cfg->upstream_port, sizeof(cfg->upstream_port)) != 0) {
+                die("invalid --upstream, expected host:port");
+            }
+        } else if (!strcmp(argv[i], "--spool-dir")) {
+            if (++i >= argc) die("missing value for --spool-dir");
+            snprintf(cfg->spool_dir, sizeof(cfg->spool_dir), "%s", argv[i]);
+        } else if (!strcmp(argv[i], "--no-delta-link")) {
+            cfg->delta_link_on_close = false;
+        } else if (!strcmp(argv[i], "--max-connections")) {
+            if (++i >= argc) die("missing value for --max-connections");
+            cfg->max_connections = atoi(argv[i]);
+        } else if (!strcmp(argv[i], "--idle-timeout")) {
+            if (++i >= argc) die("missing value for --idle-timeout");
+            cfg->idle_timeout_sec = atoi(argv[i]);
+        } else if (!strcmp(argv[i], "--backlog")) {
+            if (++i >= argc) die("missing value for --backlog");
+            cfg->backlog = atoi(argv[i]);
+        } else if (!strcmp(argv[i], "--verbose")) {
+            cfg->verbose = true;
+        } else {
+            die("unknown argument: %s", argv[i]);
+        }
+    }
+}
+
 int main(int argc, char **argv) {
+    ProxyConfig cfg;
+    config_init(&cfg);
+    parse_args(&cfg, argc, argv);
+
+    signal(SIGINT, on_signal);
+    signal(SIGTERM, on_signal);
+    signal(SIGPIPE, SIG_IGN);
+
+    int listen_fd = resolve_and_bind_listener(&cfg);
+    int epfd = epoll_create1(0);
+    if (epfd < 0) die("epoll_create1 failed: %s", strerror(errno));
+
+    if (register_fd_ctx(listen_fd, NULL, 2) != 0) {
+        die("listener ctx registration failed");
+    }
+    if (epoll_add(epfd, listen_fd, EPOLLIN | EPOLLERR | EPOLLHUP) != 0) {
+        die("epoll add listener failed: %s", strerror(errno));
+    }
+
+    fprintf(stderr,
+        "[SteelOx] listening=%s:%s upstream=%s:%s max_conn=%d idle=%ds spool=%s\n",
+        cfg.listen_host, cfg.listen_port,
+        cfg.upstream_host, cfg.upstream_port,
+        cfg.max_connections, cfg.idle_timeout_sec,
+        cfg.spool_dir
+    );
+
+    struct epoll_event events[INF_EPOLL_MAX_EVENTS];
+    time_t last_maintenance = now_sec();
+
+    while (g_running) {
+        int n = epoll_wait(epfd, events, INF_EPOLL_MAX_EVENTS, 1000);
+        if (n < 0) {
+            if (errno == EINTR) continue;
+            die("epoll_wait failed: %s", strerror(errno));
+        }
+
+        for (int i = 0; i < n; ++i) {
+            int fd = events[i].data.fd;
+            if (fd < 0 || fd >= INF_FD_MAP_CAP || !g_fd_map[fd]) continue;
+
+            FdCtx *ctx = g_fd_map[fd];
+            if (ctx->side == 2) {
+                handle_listener_accept(&cfg, epfd, listen_fd);
+                continue;
+            }
+
+            Session *s = ctx->session;
+            if (!s) continue;
+
+            bool keep = handle_side_io(&cfg, s, ctx->side, events[i].events, epfd);
+            if (!keep) {
+                logf_msg(&cfg, "[close] session=%llu client=%s",
+                         (unsigned long long)s->id, s->client_addr);
+                session_destroy(s, epfd, &cfg);
+            }
+        }
+
+        time_t now = now_sec();
+        if (now != last_maintenance) {
+            enforce_idle_timeouts(&cfg, epfd);
+            if (cfg.verbose) {
+                print_metrics(&cfg);
+            }
+            last_maintenance = now;
+        }
+    }
+
+    fprintf(stderr, "[SteelOx] shutting down\n");
+    close_all_sessions(epfd); /* you can add cfg here too if you want spool on shutdown */
+
+    epoll_del(epfd, listen_fd);
+    unregister_fd_ctx(listen_fd);
+    close(listen_fd);
+    close(epfd);
+
+    print_metrics(&cfg);
+    return 0;
+}
     Config cfg;
     config_init(&cfg);
     parse_args(&cfg, argc, argv);
