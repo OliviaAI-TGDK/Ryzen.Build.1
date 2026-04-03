@@ -64,6 +64,25 @@ typedef struct {
     bool include_gpu;
 } Config;
 
+typedef struct MagentaConfig {
+    char card[32];
+    char path[PATH_MAX];
+    char campaign_id[128];
+    char advertiser_id[128];
+    int interval_sec;
+    bool once;
+    bool include_xattrs;
+    bool include_stat;
+    bool include_gpu;
+
+    bool blockchain_mode;
+    bool emit_jsonrpc_stub;
+    char chain_namespace[64];
+    char chain_id[64];
+    char geth_rpc_url[512];
+    char contract_address[128];
+} MagentaConfig;
+
 typedef struct {
     unsigned long long vram_total;
     unsigned long long vram_used;
