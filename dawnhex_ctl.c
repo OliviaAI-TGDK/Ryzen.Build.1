@@ -24,6 +24,8 @@ static void die(const char *msg) {
 	exit(1);
 }
 
+
+
 int main(int argc, char **argv)
 {
 	int fd;
@@ -141,7 +143,55 @@ int main(int argc, char **argv)
 		}
 		return 0;
 	}
+	
+    if (!strcmp(argv[1], "duo-simplex")) {
+		struct dawnhex_duo_simplex_get_uapi get;
+		unsigned i, m;
 
+		if (argc < 3) {
+			fprintf(stderr, "usage: %s duo-simplex <pair_id>\n", argv[0]);
+			return 1;
+		}
+
+		memset(&get, 0, sizeof(get));
+		get.pair_id = (unsigned)strtoul(argv[2], NULL, 10);
+
+		if (ioctl(fd, DAWNHEX_DUO_IOC_GET_SIMPLEX, &get) < 0)
+			die("ioctl DUO_GET_SIMPLEX");
+
+		printf("pair=%u levels=%u nodes=%u base_ret=%u rec_ret=%u rec_red=%u rec_cross=%u rec_cold=%u rec_energy=%u\n",
+		       get.simplex.pair_id,
+		       get.simplex.level_count,
+		       get.simplex.node_count,
+		       get.simplex.base_retained_ppm,
+		       get.simplex.recursive_retained_ppm,
+		       get.simplex.recursive_reduction_ppm,
+		       get.simplex.recursive_crosshatch_ppm,
+		       get.simplex.recursive_coldness_ppm,
+		       get.simplex.recursive_energy_ppm);
+
+		for (i = 0; i < get.simplex.level_count; ++i) {
+			printf("level=%u fib=%u weight=%u retained=%u reduction=%u cross=%u cold=%u energy=%u pressure=%u mips=[",
+			       get.simplex.levels[i].level_index,
+			       get.simplex.levels[i].fib_value,
+			       get.simplex.levels[i].fib_weight_ppm,
+			       get.simplex.levels[i].retained_ppm,
+			       get.simplex.levels[i].reduction_ppm,
+			       get.simplex.levels[i].crosshatch_ppm,
+			       get.simplex.levels[i].coldness_ppm,
+			       get.simplex.levels[i].energy_ppm,
+			       get.simplex.levels[i].pressure_ppm);
+
+			for (m = 0; m < DAWNHEX_SIMPLEX_MIPS; ++m) {
+				printf("%u%s",
+				       get.simplex.levels[i].mip_retained_ppm[m],
+				       (m + 1 < DAWNHEX_SIMPLEX_MIPS ? "," : ""));
+			}
+			printf("]\n");
+		}
+		return 0;
+	}
+	
 	if (!strcmp(argv[1], "cluster")) {
 		struct dawnhex_cluster_uapi c;
 		memset(&c, 0, sizeof(c));
