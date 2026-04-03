@@ -82,6 +82,51 @@ static int ensure_dir(const char *path) {
     return -1;
 }
 
+static void session_destroy(Session *s, int epfd, const ProxyConfig *cfg) {
+    if (!s) return;
+
+    if (cfg) {
+        char artifact_path[PATH_MAX];
+        if (session_emit_artifact(cfg, s, artifact_path, sizeof(artifact_path)) == 0) {
+            run_delta_link_sidecar(cfg, artifact_path);
+        }
+    }
+
+    if (s->client.fd >= 0) {
+        epoll_del(epfd, s->client.fd);
+        unregister_fd_ctx(s->client.fd);
+        close(s->client.fd);
+        s->client.fd = -1;
+    }
+    if (s->upstream.fd >= 0) {
+        epoll_del(epfd, s->upstream.fd);
+        unregister_fd_ctx(s->upstream.fd);
+        close(s->upstream.fd);
+        s->upstream.fd = -1;
+    }
+
+    session_unlink(s);
+    free(s);
+    g_metrics.closed++;
+    if (g_metrics.active > 0) g_metrics.active--;
+}
+
+static void run_delta_link_sidecar(const ProxyConfig *cfg, const char *artifact_path) {
+    if (!cfg->delta_link_on_close) return;
+
+    char cmd[PATH_MAX * 2];
+    snprintf(
+        cmd, sizeof(cmd),
+        "luajit -e 'local dl=require(\"delta_link_ffi\"); "
+        "local m=assert(dl.manifest(\"%s\",4096,true)); "
+        "local j=dl.json(m); "
+        "local f=assert(io.open(\"%s.delta.json\",\"wb\")); f:write(j); f:close()'",
+        artifact_path, artifact_path
+    );
+
+    (void)system(cmd);
+}
+
 static int write_artifact_file(const char *path, const uint8_t *data, size_t len) {
     FILE *f = fopen(path, "wb");
     if (!f) return -1;
