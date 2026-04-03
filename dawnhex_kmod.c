@@ -41,6 +41,163 @@
 #define DH_SIMPLEX_FLAG_SUPERCOMPUTE  0x1
 #define DH_SIMPLEX_FLAG_CHIP_RELAY    0x2
 
+static u32 dh_duo_base_retained_ppm_locked(const struct dawnhex_duo_pair *p)
+{
+	u32 base;
+
+	/*
+	 * pair energy high  -> more aggressive compression
+	 * pair pressure high -> preserve more
+	 */
+	base = DH_SIMPLEX_MIN_RETAINED_PPM;
+	base += (1000000U - p->energy_ppm) / 20U;  /* up to ~50k */
+	base += p->pressure_ppm / 25U;             /* up to ~40k */
+
+	switch (p->mode) {
+	case DAWNHEX_DUO_INOUT_INOUT_OUT:
+		base = dh_mul_ppm(base, 980000U);
+		break;
+	case DAWNHEX_DUO_INOUT_INOUT_IN:
+		base = dh_mul_ppm(base, 1020000U);
+		break;
+	case DAWNHEX_DUO_CROSSED:
+		base = dh_mul_ppm(base, 960000U);
+		break;
+	default:
+		break;
+	}
+
+	return dh_clamp_u32(base, DH_SIMPLEX_MIN_RETAINED_PPM, DH_SIMPLEX_MAX_RETAINED_PPM);
+}
+
+static void dh_duo_recompute_simplex_locked(struct dawnhex_duo_pair *p)
+{
+	u32 fib[DAWNHEX_SIMPLEX_LEVELS];
+	u64 fib_total = 0;
+	u64 acc_ret = 0, acc_red = 0, acc_cross = 0, acc_cold = 0, acc_energy = 0;
+	u32 i, n;
+
+	memset(&p->simplex, 0, sizeof(p->simplex));
+
+	p->simplex.level_count = DAWNHEX_SIMPLEX_LEVELS;
+	p->simplex.node_count = DAWNHEX_SIMPLEX_NODES_PER_LEVEL;
+	p->simplex.flags = DH_SIMPLEX_FLAG_SUPERCOMPUTE | DH_SIMPLEX_FLAG_CHIP_RELAY;
+	p->simplex.base_retained_ppm = dh_duo_base_retained_ppm_locked(p);
+
+	dh_fill_fib22(fib, &fib_total);
+	if (!fib_total)
+		fib_total = 1;
+
+	for (i = 0; i < DAWNHEX_SIMPLEX_LEVELS; ++i) {
+		struct dawnhex_duo_simplex_level *lvl = &p->simplex.levels[i];
+		u32 fib_weight_ppm;
+		u32 level_scalar_ppm;
+		u64 level_ret = 0, level_red = 0, level_cross = 0, level_cold = 0, level_energy = 0;
+
+		lvl->level_index = i + 1;
+		lvl->fib_value = fib[i];
+		lvl->node_count = DAWNHEX_SIMPLEX_NODES_PER_LEVEL;
+
+		fib_weight_ppm = (u32)(((u64)fib[i] * DH_PPM) / fib_total);
+		lvl->fib_weight_ppm = fib_weight_ppm;
+
+		level_scalar_ppm = DH_PPM - dh_mul_ppm(fib_weight_ppm, DH_SIMPLEX_LEVEL_GAIN_PPM);
+
+		for (n = 0; n < DAWNHEX_SIMPLEX_NODES_PER_LEVEL; ++n) {
+			u32 lane = n % 3;
+			u32 slot = n % 4;
+			u32 node_scalar_ppm;
+			u32 phase_scalar_ppm;
+			u32 v;
+			u32 add_ppm;
+			u32 cross_ppm;
+			u32 cold_ppm;
+			u32 energy_ppm;
+
+			v = p->simplex.base_retained_ppm;
+			v = dh_mul_q16(v, DH_SIMPLEX_ARM_Q16);
+			v = dh_mul_q16(v, DH_SIMPLEX_U_SCALAR_Q16);
+			v = dh_clamp_u32(v, DH_SIMPLEX_MIN_RETAINED_PPM, DH_SIMPLEX_MAX_RETAINED_PPM);
+
+			add_ppm = 10200U + (slot * 1275U);
+			add_ppm = dh_mul_q16(add_ppm, DH_SIMPLEX_ADDER_Q16);
+
+			v = dh_clamp_u32(v + add_ppm, DH_SIMPLEX_MIN_RETAINED_PPM, DH_SIMPLEX_MAX_RETAINED_PPM);
+			v = dh_mul_q16(v, DH_SIMPLEX_MODIFIER_Q16);
+
+			if (DAWNHEX_SIMPLEX_NODES_PER_LEVEL > 1)
+				node_scalar_ppm = DH_PPM - ((n * DH_SIMPLEX_NODE_GAIN_PPM) / (DAWNHEX_SIMPLEX_NODES_PER_LEVEL - 1));
+			else
+				node_scalar_ppm = DH_PPM;
+
+			phase_scalar_ppm =
+				DH_PPM -
+				(((i + 1) * DH_SIMPLEX_PHASE_GAIN_PPM) / 100U) -
+				((n * DH_SIMPLEX_PHASE_GAIN_PPM) / 200U);
+
+			v = dh_mul_ppm(v, level_scalar_ppm);
+			v = dh_mul_ppm(v, node_scalar_ppm);
+			v = dh_mul_ppm(v, phase_scalar_ppm);
+
+			/* Duo refraction and quotient bias */
+			v = dh_mul_ppm(v, dh_clamp_u32(p->refraction_ppm, 900000U, 1200000U));
+			v = dh_mul_ppm(v, dh_clamp_u32(p->quotient_ppm, 800000U, 1250000U));
+
+			/* crossed mode tightens retention a bit */
+			if (p->mode == DAWNHEX_DUO_CROSSED)
+				v = dh_mul_ppm(v, 970000U);
+
+			if (p->simplex.flags & DH_SIMPLEX_FLAG_SUPERCOMPUTE)
+				v = dh_mul_ppm(v, 940000U);
+			if (p->simplex.flags & DH_SIMPLEX_FLAG_CHIP_RELAY)
+				v = dh_mul_ppm(v, 980000U);
+
+			v = dh_clamp_u32(v, DH_SIMPLEX_MIN_RETAINED_PPM, DH_SIMPLEX_MAX_RETAINED_PPM);
+
+			cross_ppm = p->quotient_ppm / 3U;
+			cross_ppm += dh_clamp_u32(p->refraction_ppm, 0U, 1500000U) / 4U;
+			cross_ppm += p->energy_ppm / 5U;
+			cross_ppm += p->pressure_ppm / 5U;
+			cross_ppm = dh_mul_ppm(cross_ppm, DH_PPM - (slot * 15000U));
+			cross_ppm = dh_clamp_u32(cross_ppm, 0U, DH_PPM);
+
+			cold_ppm = ((DH_PPM - p->energy_ppm) / 2U) + (p->pressure_ppm / 2U);
+			cold_ppm = dh_mul_ppm(cold_ppm, DH_PPM + (fib_weight_ppm / 8U));
+			cold_ppm = dh_mul_ppm(cold_ppm, DH_PPM + (lane * 10000U));
+			cold_ppm = dh_clamp_u32(cold_ppm, 0U, DH_PPM);
+
+			energy_ppm = dh_mul_q16(v, DH_SIMPLEX_KNOT_Q16);
+
+			level_ret += v;
+			level_red += (DH_PPM - v);
+			level_cross += cross_ppm;
+			level_cold += cold_ppm;
+			level_energy += energy_ppm;
+		}
+
+		lvl->retained_ppm = (u32)(level_ret / DAWNHEX_SIMPLEX_NODES_PER_LEVEL);
+		lvl->reduction_ppm = (u32)(level_red / DAWNHEX_SIMPLEX_NODES_PER_LEVEL);
+		lvl->crosshatch_ppm = (u32)(level_cross / DAWNHEX_SIMPLEX_NODES_PER_LEVEL);
+		lvl->coldness_ppm = (u32)(level_cold / DAWNHEX_SIMPLEX_NODES_PER_LEVEL);
+		lvl->energy_ppm = (u32)(level_energy / DAWNHEX_SIMPLEX_NODES_PER_LEVEL);
+		lvl->pressure_ppm = p->pressure_ppm;
+
+		dh_build_9_mips(lvl->retained_ppm, lvl->mip_retained_ppm);
+
+		acc_ret += lvl->retained_ppm;
+		acc_red += lvl->reduction_ppm;
+		acc_cross += lvl->crosshatch_ppm;
+		acc_cold += lvl->coldness_ppm;
+		acc_energy += lvl->energy_ppm;
+	}
+
+	p->simplex.recursive_retained_ppm = (u32)(acc_ret / DAWNHEX_SIMPLEX_LEVELS);
+	p->simplex.recursive_reduction_ppm = (u32)(acc_red / DAWNHEX_SIMPLEX_LEVELS);
+	p->simplex.recursive_crosshatch_ppm = (u32)(acc_cross / DAWNHEX_SIMPLEX_LEVELS);
+	p->simplex.recursive_coldness_ppm = (u32)(acc_cold / DAWNHEX_SIMPLEX_LEVELS);
+	p->simplex.recursive_energy_ppm = (u32)(acc_energy / DAWNHEX_SIMPLEX_LEVELS);
+}
+
 static inline u32 dh_mul_ppm(u32 a, u32 b)
 {
 	u64 v = (u64)a * (u64)b;
@@ -318,6 +475,8 @@ static int dh_duo_add_pair_locked(u32 a, u32 b, u32 mode, u32 *out_pair_id)
 	p->energy_ppm = 500000;
 	p->pressure_ppm = 500000;
 
+	dh_duo_recompute_simplex_locked(p);
+
 	if (out_pair_id)
 		*out_pair_id = p->pair_id;
 
@@ -377,6 +536,8 @@ static int dh_duo_pulse_locked(u32 pair_id, u32 value_ppm)
 	na->energy_ppm = dh_clamp_u32((na->energy_ppm + p->energy_ppm) / 2, 0, 1000000);
 	nb->energy_ppm = dh_clamp_u32((nb->energy_ppm + p->energy_ppm) / 2, 0, 1000000);
 
+    dh_duo_recompute_simplex_locked(p);
+	
 	memset(&ctx, 0, sizeof(ctx));
 	ctx.pair_id = p->pair_id;
 	ctx.a = p->a;
@@ -387,6 +548,10 @@ static int dh_duo_pulse_locked(u32 pair_id, u32 value_ppm)
 	ctx.refraction_ppm = p->refraction_ppm;
 	ctx.energy_ppm = p->energy_ppm;
 	ctx.pressure_ppm = p->pressure_ppm;
+	ctx.simplex_base_retained_ppm = p->simplex.base_retained_ppm;
+	ctx.simplex_recursive_retained_ppm = p->simplex.recursive_retained_ppm;
+	ctx.simplex_recursive_reduction_ppm = p->simplex.recursive_reduction_ppm;
+	ctx.simplex_recursive_energy_ppm = p->simplex.recursive_energy_ppm;
 
 	dh_duo_emit_hooks_locked(&ctx);
 
