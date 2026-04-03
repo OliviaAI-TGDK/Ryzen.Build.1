@@ -1091,8 +1091,99 @@ static long dh_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 		return 0;
 	}
 
+    case DAWNHEX_DUO_IOC_GET_SIMPLEX: {
+		struct dawnhex_duo_simplex_get_uapi get;
+		struct dawnhex_duo_pair *p;
+		u32 i, m;
+
+		if (copy_from_user(&get, (void __user *)arg, sizeof(get)))
+			return -EFAULT;
+
+		mutex_lock(&g_dawnhex.lock);
+		p = dh_duo_lookup_pair_locked(get.pair_id);
+		if (!p) {
+			mutex_unlock(&g_dawnhex.lock);
+			return -ENOENT;
+		}
+
+		memset(&get.simplex, 0, sizeof(get.simplex));
+		get.simplex.pair_id = p->pair_id;
+		get.simplex.level_count = p->simplex.level_count;
+		get.simplex.node_count = p->simplex.node_count;
+		get.simplex.base_retained_ppm = p->simplex.base_retained_ppm;
+		get.simplex.recursive_retained_ppm = p->simplex.recursive_retained_ppm;
+		get.simplex.recursive_reduction_ppm = p->simplex.recursive_reduction_ppm;
+		get.simplex.recursive_crosshatch_ppm = p->simplex.recursive_crosshatch_ppm;
+		get.simplex.recursive_coldness_ppm = p->simplex.recursive_coldness_ppm;
+		get.simplex.recursive_energy_ppm = p->simplex.recursive_energy_ppm;
+
+		for (i = 0; i < p->simplex.level_count; ++i) {
+			get.simplex.levels[i].level_index = p->simplex.levels[i].level_index;
+			get.simplex.levels[i].fib_value = p->simplex.levels[i].fib_value;
+			get.simplex.levels[i].fib_weight_ppm = p->simplex.levels[i].fib_weight_ppm;
+			get.simplex.levels[i].node_count = p->simplex.levels[i].node_count;
+			get.simplex.levels[i].retained_ppm = p->simplex.levels[i].retained_ppm;
+			get.simplex.levels[i].reduction_ppm = p->simplex.levels[i].reduction_ppm;
+			get.simplex.levels[i].crosshatch_ppm = p->simplex.levels[i].crosshatch_ppm;
+			get.simplex.levels[i].coldness_ppm = p->simplex.levels[i].coldness_ppm;
+			get.simplex.levels[i].energy_ppm = p->simplex.levels[i].energy_ppm;
+			get.simplex.levels[i].pressure_ppm = p->simplex.levels[i].pressure_ppm;
+
+			for (m = 0; m < DAWNHEX_SIMPLEX_MIPS; ++m)
+				get.simplex.levels[i].mip_retained_ppm[m] =
+					p->simplex.levels[i].mip_retained_ppm[m];
+		}
+		mutex_unlock(&g_dawnhex.lock);
+
+		if (copy_to_user((void __user *)arg, &get, sizeof(get)))
+			return -EFAULT;
+		return 0;
+	}
+	
 	return -ENOTTY;
 }
+
+static ssize_t duo_simplex_show(struct device *dev, struct device_attribute *attr, char *buf)
+{
+	ssize_t n = 0;
+	u32 i;
+
+	mutex_lock(&g_dawnhex.lock);
+	for (i = 0; i < g_dawnhex.duo.pair_count; ++i) {
+		struct dawnhex_duo_pair *p = &g_dawnhex.duo.pairs[i];
+
+		n += scnprintf(buf + n, PAGE_SIZE - n,
+			       "pair=%u base_ret=%u rec_ret=%u rec_red=%u rec_cross=%u rec_cold=%u rec_energy=%u levels=%u\n",
+			       p->pair_id,
+			       p->simplex.base_retained_ppm,
+			       p->simplex.recursive_retained_ppm,
+			       p->simplex.recursive_reduction_ppm,
+			       p->simplex.recursive_crosshatch_ppm,
+			       p->simplex.recursive_coldness_ppm,
+			       p->simplex.recursive_energy_ppm,
+			       p->simplex.level_count);
+
+		if (p->simplex.level_count > 0) {
+			struct dawnhex_duo_simplex_level *l0 = &p->simplex.levels[0];
+			n += scnprintf(buf + n, PAGE_SIZE - n,
+				       "  level0 fib=%u retained=%u reduction=%u cross=%u cold=%u energy=%u\n",
+				       l0->fib_value,
+				       l0->retained_ppm,
+				       l0->reduction_ppm,
+				       l0->crosshatch_ppm,
+				       l0->coldness_ppm,
+				       l0->energy_ppm);
+		}
+
+		if (n >= PAGE_SIZE)
+			break;
+	}
+	mutex_unlock(&g_dawnhex.lock);
+
+	return n;
+}
+
+static DEVICE_ATTR_RO(duo_simplex);
 
 static const struct file_operations dawnhex_fops = {
 	.owner          = THIS_MODULE,
@@ -1211,6 +1302,7 @@ static DEVICE_ATTR_RW(interactive);
 
 static struct attribute *dawnhex_attrs[] = {
     &dev_attr_duo.attr,
+    &dev_attr_duo_simplex.attr,
 	&dev_attr_summary.attr,
 	&dev_attr_topology.attr,
 	&dev_attr_tick_ms.attr,
