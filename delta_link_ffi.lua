@@ -257,4 +257,41 @@ function M.manifest_from_data(data, block_size, emit_blocks)
     block_hash_roots = {
       source = M.fnv1a64(table.concat(source_blocks, "|")),
       canonical = M.fnv1a64(table.concat(canonical_blocks, "|")),
-      reverse_canonical = M.fnv1a
+      reverse_canonical = M.fnv1a64(table.concat(reverse_blocks, "|")),
+      inter_reversed = M.fnv1a64(table.concat(inter_blocks, "|"))
+    }
+  }
+
+  if emit_blocks then
+    m.block_hashes = {
+      source = source_blocks,
+      canonical = canonical_blocks,
+      reverse_canonical = reverse_blocks,
+      inter_reversed = inter_blocks
+    }
+  end
+
+  return m
+end
+
+function M.manifest(path, block_size, emit_blocks)
+  local data, err = read_file(path)
+  if not data then return nil, err end
+  local m = M.manifest_from_data(data, block_size, emit_blocks)
+  m.path = path
+  return m
+end
+
+function M.read_file(path)
+  return read_file(path)
+end
+
+function M.write_file(path, data)
+  return write_file(path, data)
+end
+
+function M.json(v)
+  return encode_json(v)
+end
+
+return M
